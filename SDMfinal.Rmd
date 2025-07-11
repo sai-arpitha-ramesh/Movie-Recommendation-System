@@ -1,0 +1,235 @@
+---
+title: "SDM Final Project"
+author: "Sai Arpitha Ramesh"
+date: "2024-12-10"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(ClusterR)
+library(factoextra)
+library(recommenderlab)
+library(data.table)
+library(tidyr)
+```
+
+##Data Loading 
+```{r}
+uratings <- fread("E:/Fall/SLDM2/project/dataset/u.data", header = FALSE, sep = "\t")
+colnames(uratings) <- c("userId", "movieId", "rating", "timestamp")
+
+movies <- fread("E:/Fall/SLDM2/project/dataset/u.item", header = FALSE, sep = "|")
+colnames(movies) <- c("movieId", "title", "releaseDate", "videoReleaseDate", "IMDbURL", "unknown", "Action", "Adventure", 
+                      "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama", "Fantasy", "FilmNoir", "Horror", 
+                      "Musical", "Mystery", "Romance", "SciFi", "Thriller", "War", "Western")
+```
+
+```{r}
+head(movies)
+head(uratings)
+```
+```{r}
+na_count <- colSums(is.na(movies))
+print(na_count)
+
+```
+```{r}
+uratings <- uratings %>% 
+  mutate(userId = as.factor(userId), movieId = as.factor(movieId), rating = as.numeric(rating))
+```
+
+```{r}
+movies <- movies %>% 
+  mutate(movieId = as.factor(movieId))
+```
+
+```{r}
+movies <- movies %>% select(-videoReleaseDate)
+print(colnames(movies))
+```
+```{r}
+movie_data <- merge(uratings, movies, by = "movieId")
+```
+
+```{r}
+movie_data <- movie_data %>%
+  mutate(rating = as.numeric(rating))
+movie_data <- movie_data %>%
+  filter(!is.na(rating))
+```
+
+```{r}
+library(recommenderlab)
+user_item_matrix <- movie_data %>%
+  select(userId, movieId, rating) %>%
+  spread(movieId, rating)
+```
+
+```{r}
+rownames(user_item_matrix) <- user_item_matrix$userId
+user_item_matrix <- user_item_matrix[, -1]
+user_item_matrix[is.na(user_item_matrix)] <- 0
+```
+
+#PCA Analysis
+```{r}
+pca_result <- prcomp(user_item_matrix, center = TRUE, scale. = TRUE)
+
+# Project data onto first two principal components
+pca_data <- data.frame(pca_result$x[, 1:2])
+pca_data$userId <- rownames(user_item_matrix)
+# Visualize the PCA
+summary(pca_result)  # To see variance explained by components
+fviz_eig(pca_result)  # Scree plot to check the number of components
+
+# Project the data onto the first two principal components
+pca_data <- data.frame(pca_result$x)
+pca_data <- data.frame(pca_result$x[, 1:2])
+pca_data$userId <- rownames(user_item_matrix)
+
+# Plot
+ggplot(pca_data, aes(x = PC1, y = PC2, color = userId)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "PCA of User-Movie Interaction Matrix") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+```{r}
+set.seed(123)
+kmeans_result <- kmeans(pca_data[, 1:2], centers = 5, nstart = 25)
+
+# Assign cluster labels to users
+user_item_matrix$cluster <- kmeans_result$cluster
+# Visualize the clusters
+fviz_cluster(kmeans_result, data = pca_data[, 1:2], geom = "point", ellipse.type = "convex") +
+  labs(title = "K-means Clustering of Users")
+
+# Assign cluster labels to users
+user_item_matrix$cluster <- kmeans_result$cluster
+```
+#Recommendation Function 
+```{r}
+recommend_movies <- function(user_id, num_recommendations = 5) {
+  if (!(as.character(user_id) %in% rownames(user_item_matrix))) {
+    stop(paste("User ID", user_id, "not found in the dataset."))
+  }
+  
+  user_cluster <- kmeans_result$cluster[as.character(user_id)]
+  cluster_users <- names(kmeans_result$cluster[kmeans_result$cluster == user_cluster])
+  
+  cluster_ratings <- colMeans(user_item_matrix[cluster_users, -ncol(user_item_matrix), drop = FALSE], na.rm = TRUE)
+  
+  user_ratings <- user_item_matrix[as.character(user_id), -ncol(user_item_matrix)]
+  unrated_movies <- names(cluster_ratings)[is.na(user_ratings) | user_ratings == 0]
+  
+  recommendations <- sort(cluster_ratings[unrated_movies], decreasing = TRUE)[1:num_recommendations]
+  
+  if (length(recommendations) == 0) {
+    return(data.frame(movieId = integer(), title = character(), avg_rating = numeric()))
+  }
+  
+  recommended_movies <- movies[movies$movieId %in% names(recommendations), c("movieId", "title")]
+  recommended_movies$avg_rating <- recommendations[match(recommended_movies$movieId, names(recommendations))]
+  
+  return(recommended_movies[order(-recommended_movies$avg_rating), ])
+}
+```
+
+```{r}
+# Example
+user_id_to_recommend <- 4
+recommendations <- recommend_movies(user_id_to_recommend)
+print(recommendations)
+```
+```{r}
+top_n_components <- 5
+top_loadings <- lapply(1:top_n_components, function(i) {
+  loadings <- pca_result$rotation[, i]
+  top_movies <- head(sort(abs(loadings), decreasing = TRUE), 10)
+  data.frame(
+    PC = paste0("PC", i),
+    MovieId = names(top_movies),
+    Loading = top_movies
+  )
+})
+
+top_loadings_df <- do.call(rbind, top_loadings)
+
+# Get movie titles
+top_loadings_df <- merge(top_loadings_df, movies[, c("movieId", "title")], by.x = "MovieId", by.y = "movieId")
+
+
+print(top_loadings_df)
+top_loadings_df$title <- iconv(top_loadings_df$title, to = "ASCII", sub = "")
+
+
+ggplot(top_loadings_df, aes(x = reorder(title, Loading), y = Loading, fill = PC)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~PC, scales = "free_y") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Top Movie Loadings for Principal Components",
+       x = "Movie Title", y = "Loading") +
+  theme(axis.text.y = element_text(size = 8))
+```
+
+```{r}
+# Ensure movieId is of the same type in both dataframes
+movies[, movieId := as.character(movieId)]
+recommendations[, movieId := as.character(movieId)]
+genre_columns <- c("Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama", "Fantasy", "FilmNoir", "Horror", "Musical", "Mystery", "Romance", "SciFi", "Thriller", "War", "Western")
+
+# Get the genres for recommended movies
+recommended_genres <- movies[movieId %in% recommendations$movieId, ..genre_columns]
+
+# Sum the genres and sort
+top_genres <- colSums(recommended_genres)
+top_genres <- sort(top_genres, decreasing = TRUE)
+
+# Print the top 5 genres
+print(head(top_genres, 5))
+```
+
+```{r}
+top_genres <- movies[movieId %in% recommendations$movieId, ..genre_columns] %>%
+  colSums(na.rm = TRUE) %>%
+  sort(decreasing = TRUE) %>%
+  head(5)
+
+print(top_genres)
+```
+
+## Including Plots
+```{r}
+
+ggplot(data.frame(genre = names(top_genres), count = top_genres), aes(x = reorder(genre, -count), y = count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_minimal() +
+  labs(title = paste("Top Genres in Recommendations for User", user_id_to_recommend),
+       x = "Genre", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
